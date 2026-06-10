@@ -26,8 +26,12 @@ export class ShortcodeService {
   }
 
   decode(code: string): number | null {
-    const decoded = this.hashids.decode(code);
-    if (!decoded.length) return null;
-    return Number(decoded[0]) - COUNTER_OFFSET;
+    try {
+      const decoded = this.hashids.decode(code);
+      if (!decoded.length) return null;
+      return Number(decoded[0]) - COUNTER_OFFSET;
+    } catch {
+      return null;
+    }
   }
 }
