@@ -1,98 +1,251 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Diminuto 🔗
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Encurtador de links pessoal construído com NestJS + Fastify. Projeto desenvolvido com foco em aprendizado do ecossistema NestJS e boas práticas de arquitetura backend.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Stack
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+| Camada         | Tecnologia                               |
+| -------------- | ---------------------------------------- |
+| Framework      | NestJS com adapter Fastify               |
+| Banco de dados | PostgreSQL via [Neon](https://neon.tech) |
+| ORM            | Prisma 7                                 |
+| Cache / IDs    | Redis via [Upstash](https://upstash.com) |
+| Autenticação   | JWT + Passport                           |
+| Short code     | HashIDs + Redis INCR                     |
+| Eventos        | EventEmitter2                            |
+| Documentação   | Swagger / OpenAPI                        |
+| Testes         | Jest                                     |
+| Deploy         | Render                                   |
 
-## Project setup
+---
 
-```bash
-$ npm install
+## Arquitetura de módulos
+
+```
+src/
+├── shared/
+│   ├── prisma/       → PrismaService global (adapter pg)
+│   ├── redis/        → RedisService global (ioredis)
+│   └── shortcode/    → ShortcodeService (HashIDs + Redis INCR)
+├── auth/             → JWT, guards, register/login
+├── users/            → UsersService
+├── links/            → CRUD de links
+├── redirect/         → GET /:code → redirect 302
+└── analytics/        → listener de cliques + stats
 ```
 
-## Compile and run the project
+### Fluxo principal
 
-```bash
-# development
-$ npm run start
+```
+POST /links
+  → ShortcodeService.generate()
+      → Redis INCR (contador atômico)
+      → HashIDs.encode(counter + offset)
+  → Prisma.link.create()
+  → Redis.set(link:code, url, TTL)
 
-# watch mode
-$ npm run start:dev
+GET /:code
+  → Redis.get(link:code)
+      → cache hit  → EventEmitter.emit('click.created')  → redirect 302
+      → cache miss → Prisma.link.findUnique()
+                   → Redis.set(link:code, url, TTL)
+                   → EventEmitter.emit('click.created')
+                   → redirect 302
 
-# production mode
-$ npm run start:prod
+@OnEvent('click.created')  [async, não bloqueia o redirect]
+  → Prisma.click.create()
 ```
 
-## Run tests
+---
 
-```bash
-# unit tests
-$ npm run test
+## Decisões de arquitetura
 
-# e2e tests
-$ npm run test:e2e
+**302 em vez de 301**
+O status 301 (Moved Permanently) faz o browser cachear o redirect localmente — as visitas seguintes nunca chegam ao servidor, o que inviabiliza o analytics. O 302 (Found) força o browser a sempre passar pelo servidor, permitindo registrar cada clique.
 
-# test coverage
-$ npm run test:cov
+**Redis INCR para geração de IDs**
+Em ambiente distribuído com múltiplas instâncias, um contador local causaria colisões. O comando `INCR` do Redis é atômico — garante IDs únicos mesmo com vários servidores rodando em paralelo.
+
+**HashIDs + secret**
+A conversão direta de inteiro para Base62 seria sequencial e previsível (`1 → 1`, `2 → 2`). O HashIDs embaralha o resultado usando uma chave secreta, tornando impossível adivinhar o próximo código ou reverter a sequência sem a secret.
+
+**Offset de 14.776.336 (62⁴)**
+Garante que o menor código gerado sempre tenha no mínimo 4 caracteres. Sem o offset, o primeiro link geraria um código de 1 caractere.
+
+**EventEmitter2 desacoplado do redirect**
+Se o registro do clique fosse feito de forma síncrona no caminho do redirect, uma lentidão no banco atrasaria o usuário. Com o EventEmitter2, o redirect retorna imediatamente e a persistência acontece em background.
+
+**PrismaPg adapter (Prisma 7)**
+O Prisma 7 removeu o suporte a `url` no `schema.prisma` e exige um adapter explícito no construtor do client. A configuração de conexão migrou para `prisma.config.ts`.
+
+**Neon em vez do Postgres do Render**
+O Postgres gratuito do Render expira após 90 dias e apaga os dados. O Neon é serverless, persistente e tem free tier sem expiração.
+
+---
+
+## Schema do banco
+
+```prisma
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  links     Link[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Link {
+  id        String    @id @default(cuid())
+  code      String    @unique
+  url       String
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clicks    Click[]
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Click {
+  id        String   @id @default(cuid())
+  linkId    String
+  link      Link     @relation(fields: [linkId], references: [id], onDelete: Cascade)
+  ip        String?
+  country   String?
+  referrer  String?
+  userAgent String?
+  createdAt DateTime @default(now())
+}
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Endpoints
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Método | Rota               | Auth | Descrição                                 |
+| ------ | ------------------ | ---- | ----------------------------------------- |
+| POST   | /auth/register     | ❌   | Criar conta, retorna JWT                  |
+| POST   | /auth/login        | ❌   | Login, retorna JWT                        |
+| POST   | /links             | ✅   | Criar link curto                          |
+| GET    | /links             | ✅   | Listar meus links com contagem de cliques |
+| DELETE | /links/:code       | ✅   | Deletar link                              |
+| GET    | /:code             | ❌   | Redirect 302 para URL original            |
+| GET    | /links/:code/stats | ✅   | Estatísticas do link                      |
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+Documentação interativa disponível em `/docs` (Swagger UI).
+
+---
+
+## Variáveis de ambiente
+
+```env
+PORT=3000
+
+# Neon Postgres
+DATABASE_URL="postgresql://user:password@host/diminuto?sslmode=require"
+
+# Upstash Redis
+REDIS_URL="rediss://default:password@host:port"
+
+# JWT
+JWT_SECRET="string-longa-e-aleatoria"
+
+# HashIDs — não alterar após primeiro deploy (invalidaria todos os códigos)
+HASHIDS_SECRET="string-longa-e-aleatoria"
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Para gerar secrets seguros:
 
-## Resources
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+---
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## Setup local
 
-## Support
+```bash
+# 1. Instalar dependências
+npm install
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+# 2. Configurar variáveis de ambiente
+cp .env.example .env
+# preencher .env com as credenciais
 
-## Stay in touch
+# 3. Gerar Prisma client
+npx prisma generate
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+# 4. Rodar migrations
+npx prisma migrate dev --name init
 
-## License
+# 5. Rodar em desenvolvimento
+npm run start:dev
+```
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+---
+
+## Testes
+
+```bash
+# Rodar todos os testes
+npm test
+
+# Watch mode
+npm run test:watch
+
+# Cobertura
+npm run test:cov
+```
+
+Os testes são unitários — cada service é testado de forma isolada com mocks. Sem dependência de banco ou Redis.
+
+Suites cobertas: `ShortcodeService`, `UsersService`, `AuthService`, `LinksService`, `RedirectService`, `AnalyticsService`.
+
+---
+
+## Deploy (Render + Neon + Upstash)
+
+**Build command:**
+
+```bash
+npm install && npx prisma generate && npm run build
+```
+
+**Start command:**
+
+```bash
+node dist/main
+```
+
+**Antes do primeiro deploy**, rodar a migration apontando para o Neon:
+
+```bash
+npx prisma migrate deploy
+```
+
+O `migrate deploy` aplica as migrations existentes sem criar novas — comando correto para produção.
+
+---
+
+## Lições aprendidas (Prisma 7)
+
+O Prisma 7 introduziu mudanças breaking em relação às versões anteriores:
+
+- `url` no `datasource` do `schema.prisma` foi removido — a conexão agora é configurada em `prisma.config.ts`
+- `PrismaClient` exige um `adapter` explícito no construtor — usar `@prisma/adapter-pg`
+- `PrismaClient` não é mais exportado diretamente de `@prisma/client` da mesma forma — verificar o caminho após `prisma generate`
+
+```ts
+// prisma.service.ts com Prisma 7
+import { PrismaPg } from '@prisma/adapter-pg';
+
+constructor(config: ConfigService) {
+  const adapter = new PrismaPg({
+    connectionString: config.getOrThrow<string>('DATABASE_URL'),
+  });
+  super({ adapter });
+}
+```

@@ -37,20 +37,20 @@ describe('AuthService', () => {
     it('deve registrar um usuário e retornar um token', async () => {
       mockUsersService.create.mockResolvedValue({
         id: 'user-id',
-        email: 'nando@teste.com',
+        email: 'teste@teste.com',
         createdAt: new Date(),
       });
 
-      const result = await service.register('nando@teste.com', '123456');
+      const result = await service.register('teste@teste.com', '123456');
 
       expect(result).toEqual({ token: 'mocked-token' });
       expect(mockUsersService.create).toHaveBeenCalledWith(
-        'nando@teste.com',
+        'teste@teste.com',
         '123456',
       );
       expect(mockJwtService.sign).toHaveBeenCalledWith({
         sub: 'user-id',
-        email: 'nando@teste.com',
+        email: 'teste@teste.com',
       });
     });
   });
@@ -60,11 +60,11 @@ describe('AuthService', () => {
       const hashed = await bcrypt.hash('123456', 10);
       mockUsersService.findByEmail.mockResolvedValue({
         id: 'user-id',
-        email: 'nando@teste.com',
+        email: 'teste@teste.com',
         password: hashed,
       });
 
-      const result = await service.login('nando@teste.com', '123456');
+      const result = await service.login('teste@teste.com', '123456');
 
       expect(result).toEqual({ token: 'mocked-token' });
     });
@@ -81,12 +81,12 @@ describe('AuthService', () => {
       const hashed = await bcrypt.hash('123456', 10);
       mockUsersService.findByEmail.mockResolvedValue({
         id: 'user-id',
-        email: 'nando@teste.com',
+        email: 'teste@teste.com',
         password: hashed,
       });
 
       await expect(
-        service.login('nando@teste.com', 'senha-errada'),
+        service.login('teste@teste.com', 'senha-errada'),
       ).rejects.toThrow(UnauthorizedException);
     });
   });
